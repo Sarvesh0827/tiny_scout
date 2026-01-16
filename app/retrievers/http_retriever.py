@@ -1,21 +1,22 @@
 """
-HTTP-based retriever using httpx/requests + trafilatura.
-This is the fallback/default retriever.
+HTTP-based retriever with REAL search using DuckDuckGo.
+Seeds are ONLY used as last resort fallback.
 """
 import httpx
 import trafilatura
 import hashlib
 import os
 from typing import List, Optional
+from duckduckgo_search import DDGS
 from .base import BaseRetriever, Document, UrlCandidate
-from app.seeds import SEEDS_BY_CATEGORY
+from app.seeds import classify_topic, get_seeds_for_topic
 
 CACHE_DIR = "cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
 class HttpRetriever(BaseRetriever):
-    """Retrieves content using HTTP requests (no JS execution)."""
+    """Retrieves content using HTTP requests with DuckDuckGo search."""
     
     def __init__(self):
         self.headers = {
@@ -23,38 +24,77 @@ class HttpRetriever(BaseRetriever):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
+        self.ddgs = DDGS()
         
     def _get_cache_path(self, url: str) -> str:
         """Get cache file path for URL."""
         hash_digest = hashlib.md5(url.encode()).hexdigest()
         return os.path.join(CACHE_DIR, f"{hash_digest}.txt")
     
-    def _get_seeds_for_query(self, query: str) -> List[str]:
-        """Get seeded URLs based on query keywords."""
-        query_lower = query.lower()
-        if "player" in query_lower or "competitor" in query_lower or "company" in query_lower:
-            return SEEDS_BY_CATEGORY["key_players"]
-        elif "trend" in query_lower or "future" in query_lower:
-            return SEEDS_BY_CATEGORY["trends"]
-        elif "need" in query_lower or "challenge" in query_lower or "gap" in query_lower:
-            return SEEDS_BY_CATEGORY["unmet_needs"]
-        else:
-            return SEEDS_BY_CATEGORY["default"]
-    
-    async def search(self, query: str, max_results: int = 5) -> List[UrlCandidate]:
+    async def search(self, query: str, max_results: int = 8) -> List[UrlCandidate]:
         """
-        Search using seeded URLs (DDG disabled for reliability).
-        Returns UrlCandidates from our curated seed list.
+        Search using DuckDuckGo with fallback to topic-specific seeds.
         """
-        print(f"[HTTP_RETRIEVER] Using seeded URLs for query: {query[:50]}...")
-        seed_urls = self._get_seeds_for_query(query)
+        print(f"[HTTP_RETRIEVER] Searching DuckDuckGo for: '{query[:60]}...'")
         
         candidates = []
+        
+        # 1. Try DuckDuckGo search
+        try:
+            results = self.ddgs.text(query, max_results=max_results)
+            if results:
+                for r in results:
+                    if 'href' in r and 'title' in r:
+                        candidates.append(UrlCandidate(
+                            url=r['href'],
+                            title=r.get('title', 'No title'),
+                            snippet=r.get('body', '')
+                        ))
+                
+                if candidates:
+                    print(f"[RETRIEVER] mode=ddgs_search urls={len(candidates)}")
+                    return candidates
+        except Exception as e:
+            print(f"[HTTP_RETRIEVER] DuckDuckGo search failed: {e}")
+        
+        # 2. Try simplified query (remove extra words)
+        if not candidates:
+            print(f"[HTTP_RETRIEVER] Retrying with simplified query...")
+            simplified = " ".join(query.split()[:5])  # First 5 words
+            try:
+                results = self.ddgs.text(simplified, max_results=max_results)
+                if results:
+                    for r in results:
+                        if 'href' in r and 'title' in r:
+                            candidates.append(UrlCandidate(
+                                url=r['href'],
+                                title=r.get('title', 'No title'),
+                                snippet=r.get('body', '')
+                            ))
+                    
+                    if candidates:
+                        print(f"[RETRIEVER] mode=ddgs_search_simplified urls={len(candidates)}")
+                        return candidates
+            except Exception as e:
+                print(f"[HTTP_RETRIEVER] Simplified search failed: {e}")
+        
+        # 3. Topic-gated seed fallback (LAST RESORT)
+        topic = classify_topic(query)
+        print(f"[RETRIEVER] Query topic classified as: {topic}")
+        
+        if topic == "unknown":
+            print(f"[RETRIEVER] mode=seed_fallback blocked (topic unknown - refusing to use irrelevant seeds)")
+            return []  # Return empty - do not use seeds for unknown topics
+        
+        # Use topic-specific seeds
+        seed_urls = get_seeds_for_topic(topic)
+        print(f"[RETRIEVER] mode=seed_fallback topic={topic} urls={len(seed_urls)}")
+        
         for url in seed_urls[:max_results]:
             candidates.append(UrlCandidate(
                 url=url,
-                title=url.split("/")[-1] or url,
-                snippet=f"Seeded URL for {query[:30]}"
+                title=f"Seed: {url.split('/')[-1]}",
+                snippet=f"Fallback seed for {topic}"
             ))
         
         return candidates
@@ -111,7 +151,7 @@ class HttpRetriever(BaseRetriever):
                     title="Extracted Content",
                     text=extracted,
                     text_length=len(extracted),
-                    raw_html=html_content[:1000],  # Store snippet
+                    raw_html=html_content[:1000],
                     retrieval_method="http"
                 )
             else:

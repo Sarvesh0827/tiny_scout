@@ -38,13 +38,44 @@ class PlannerAgent:
         self.parser = PydanticOutputParser(pydantic_object=ResearchPlan)
         
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert research planner. breakdown the user's research question into actionable web research tasks. "
-                       "Return a JSON object with a 'main_goal' and a list of 'tasks'. Each task should have a clear description. "
-                       "LIMIT the number of tasks to 3-5 for now to ensure speed."),
+            ("system", "You are an expert research planner. Break down the user's research question into 3-5 actionable web research tasks. "
+                       "IMPORTANT: Return ONLY valid JSON with NO markdown formatting, NO code blocks, NO prose. "
+                       "Format: {\"main_goal\": \"...\", \"tasks\": [{\"description\": \"...\"}, ...]}"),
             ("user", "{query}")
         ])
         
         self.chain = self.prompt | self.llm 
+
+    def _extract_json(self, text: str) -> dict:
+        """Extract JSON from response, handling markdown and prose."""
+        import re
+        
+        # Try to find JSON between first { and last }
+        first_brace = text.find('{')
+        last_brace = text.rfind('}')
+        
+        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+            json_str = text[first_brace:last_brace+1]
+            try:
+                return json.loads(json_str)
+            except:
+                pass
+        
+        # If that fails, try the whole text
+        try:
+            return json.loads(text)
+        except:
+            pass
+        
+        # Last resort: look for JSON in code blocks
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                return json.loads(json_match.group(1))
+            except:
+                pass
+        
+        return None
 
     async def plan(self, state: AgentState) -> dict:
         """
@@ -52,35 +83,66 @@ class PlannerAgent:
         """
         print(f"--- PLANNER: Planning for query: {state['query']} ---")
         
-        # We invoke the LLM. 
-        # Note: ChatOllama with format="json" ensures we get JSON. 
-        # However, we might need to parse it carefully if the model is chatty.
+        # Invoke LLM
         response = await self.chain.ainvoke({"query": state['query']})
         
-        # In a real impl, we'd add robust parsing here. 
-        # For this hackathon scope, we assume the model obeys the JSON instruction or we do simple parsing.
+        # Extract content
+        content_str = response.content if hasattr(response, 'content') else str(response)
         
-        import json
+        # Try to parse JSON with robust extraction
+        data = self._extract_json(content_str)
+        
+        if not data:
+            print(f"[PLANNER] JSON parse failed, retrying with explicit instruction...")
+            # Retry once with more explicit prompt
+            retry_response = await self.llm.ainvoke(
+                f"Convert this research question into JSON format with main_goal and tasks array. "
+                f"Return ONLY the JSON object, nothing else: {state['query']}"
+            )
+            retry_content = retry_response.content if hasattr(retry_response, 'content') else str(retry_response)
+            data = self._extract_json(retry_content)
+        
+        if not data:
+            print(f"[PLANNER] JSON parse still failed, using fallback single task")
+            # Fallback: create a single task
+            return {
+                "plan": [ResearchTask(
+                    id=str(uuid.uuid4()),
+                    description=state['query'],
+                    status="pending"
+                )],
+                "messages": ["Planner used fallback (JSON parse failed)"]
+            }
+        
+        # Convert to internal model
         try:
-            # content might be a string or already a dict/object depending on langchain version/config
-            content_str = response.content if hasattr(response, 'content') else str(response)
-            data = json.loads(content_str)
-            
-            # Convert to internal model
             tasks = []
             for t in data.get("tasks", []):
+                task_desc = t.get("description") if isinstance(t, dict) else str(t)
                 tasks.append(ResearchTask(
                     id=str(uuid.uuid4()),
-                    description=t.get("description", str(t)),
+                    description=task_desc,
                     status="pending"
                 ))
             
+            if not tasks:
+                # If no tasks, use the query itself
+                tasks = [ResearchTask(
+                    id=str(uuid.uuid4()),
+                    description=state['query'],
+                    status="pending"
+                )]
+            
+            print(f"[PLANNER] Generated {len(tasks)} tasks")
             return {"plan": tasks, "messages": ["Planner generated tasks."]}
             
         except Exception as e:
-            print(f"Error parsing plan: {e}")
-            # Fallback plan
+            print(f"[PLANNER] Error processing tasks: {e}")
             return {
-                "plan": [ResearchTask(id=str(uuid.uuid4()), description=f"Research {state['query']}", status="pending")],
-                "messages": [f"Planner error: {e}. using fallback."]
+                "plan": [ResearchTask(
+                    id=str(uuid.uuid4()),
+                    description=state['query'],
+                    status="pending"
+                )],
+                "messages": [f"Planner error: {e}. Using fallback."]
             }
