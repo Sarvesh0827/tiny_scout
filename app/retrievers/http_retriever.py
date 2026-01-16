@@ -1,22 +1,21 @@
 """
-HTTP-based retriever with REAL search using DuckDuckGo.
-Seeds are ONLY used as last resort fallback.
+HTTP-based retriever with robust search using ddgs.
 """
 import httpx
 import trafilatura
 import hashlib
 import os
 from typing import List, Optional
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from .base import BaseRetriever, Document, UrlCandidate
-from app.seeds import classify_topic, get_seeds_for_topic
+from app.seeds import classify_topic, get_seeds_for_topic, rewrite_query_for_search
 
 CACHE_DIR = "cache"
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
 
 class HttpRetriever(BaseRetriever):
-    """Retrieves content using HTTP requests with DuckDuckGo search."""
+    """Retrieves content using HTTP requests with ddgs search."""
     
     def __init__(self):
         self.headers = {
@@ -24,7 +23,6 @@ class HttpRetriever(BaseRetriever):
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
         }
-        self.ddgs = DDGS()
         
     def _get_cache_path(self, url: str) -> str:
         """Get cache file path for URL."""
@@ -33,18 +31,21 @@ class HttpRetriever(BaseRetriever):
     
     async def search(self, query: str, max_results: int = 8) -> List[UrlCandidate]:
         """
-        Search using DuckDuckGo with fallback to topic-specific seeds.
+        Search using ddgs with intelligent query rewriting and fallback.
         """
-        print(f"[HTTP_RETRIEVER] Searching DuckDuckGo for: '{query[:60]}...'")
+        print(f"[HTTP_RETRIEVER] Searching for: '{query[:60]}...'")
         
         candidates = []
+        topic = classify_topic(query)
+        print(f"[HTTP_RETRIEVER] Topic: {topic}")
         
-        # 1. Try DuckDuckGo search
+        # 1. Try ddgs search with original query
         try:
-            results = self.ddgs.text(query, max_results=max_results)
+            ddgs = DDGS()
+            results = ddgs.text(query, max_results=max_results)
             if results:
                 for r in results:
-                    if 'href' in r and 'title' in r:
+                    if isinstance(r, dict) and 'href' in r:
                         candidates.append(UrlCandidate(
                             url=r['href'],
                             title=r.get('title', 'No title'),
@@ -55,17 +56,40 @@ class HttpRetriever(BaseRetriever):
                     print(f"[RETRIEVER] mode=ddgs_search urls={len(candidates)}")
                     return candidates
         except Exception as e:
-            print(f"[HTTP_RETRIEVER] DuckDuckGo search failed: {e}")
+            print(f"[HTTP_RETRIEVER] ddgs search failed: {e}")
         
-        # 2. Try simplified query (remove extra words)
-        if not candidates:
-            print(f"[HTTP_RETRIEVER] Retrying with simplified query...")
-            simplified = " ".join(query.split()[:5])  # First 5 words
+        # 2. Try with rewritten query (keyword-focused)
+        if not candidates and topic != "unknown":
+            rewritten = rewrite_query_for_search(query, topic)
+            print(f"[HTTP_RETRIEVER] Retrying with rewritten query: '{rewritten[:60]}...'")
             try:
-                results = self.ddgs.text(simplified, max_results=max_results)
+                ddgs = DDGS()
+                results = ddgs.text(rewritten, max_results=max_results)
                 if results:
                     for r in results:
-                        if 'href' in r and 'title' in r:
+                        if isinstance(r, dict) and 'href' in r:
+                            candidates.append(UrlCandidate(
+                                url=r['href'],
+                                title=r.get('title', 'No title'),
+                                snippet=r.get('body', '')
+                            ))
+                    
+                    if candidates:
+                        print(f"[RETRIEVER] mode=ddgs_search_rewritten urls={len(candidates)}")
+                        return candidates
+            except Exception as e:
+                print(f"[HTTP_RETRIEVER] Rewritten search failed: {e}")
+        
+        # 3. Try simplified query (first 5 words)
+        if not candidates:
+            simplified = " ".join(query.split()[:5])
+            print(f"[HTTP_RETRIEVER] Retrying with simplified: '{simplified}'")
+            try:
+                ddgs = DDGS()
+                results = ddgs.text(simplified, max_results=max_results)
+                if results:
+                    for r in results:
+                        if isinstance(r, dict) and 'href' in r:
                             candidates.append(UrlCandidate(
                                 url=r['href'],
                                 title=r.get('title', 'No title'),
@@ -78,13 +102,10 @@ class HttpRetriever(BaseRetriever):
             except Exception as e:
                 print(f"[HTTP_RETRIEVER] Simplified search failed: {e}")
         
-        # 3. Topic-gated seed fallback (LAST RESORT)
-        topic = classify_topic(query)
-        print(f"[RETRIEVER] Query topic classified as: {topic}")
-        
+        # 4. Topic-gated seed fallback (LAST RESORT)
         if topic == "unknown":
-            print(f"[RETRIEVER] mode=seed_fallback blocked (topic unknown - refusing to use irrelevant seeds)")
-            return []  # Return empty - do not use seeds for unknown topics
+            print(f"[RETRIEVER] mode=seed_fallback blocked (topic unknown)")
+            return []
         
         # Use topic-specific seeds
         seed_urls = get_seeds_for_topic(topic)
@@ -126,15 +147,14 @@ class HttpRetriever(BaseRetriever):
                 resp.raise_for_status()
                 html_content = resp.text
         except Exception as e:
-            print(f"[HTTP_RETRIEVER] Httpx failed for {url}: {e}. Trying requests...")
-            # Fallback to requests
+            print(f"[HTTP_RETRIEVER] Httpx failed: {e}. Trying requests...")
             try:
                 import requests
                 resp = requests.get(url, headers=self.headers, timeout=15, verify=True)
                 resp.raise_for_status()
                 html_content = resp.text
             except Exception as e2:
-                print(f"[HTTP_RETRIEVER] Requests failed for {url}: {e2}")
+                print(f"[HTTP_RETRIEVER] Requests failed: {e2}")
                 return None
         
         # Extract text
@@ -158,5 +178,5 @@ class HttpRetriever(BaseRetriever):
                 print(f"[HTTP_RETRIEVER] Content too thin: {url}")
                 return None
         except Exception as e:
-            print(f"[HTTP_RETRIEVER] Extraction failed for {url}: {e}")
+            print(f"[HTTP_RETRIEVER] Extraction failed: {e}")
             return None

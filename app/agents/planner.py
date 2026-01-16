@@ -103,18 +103,44 @@ class PlannerAgent:
             data = self._extract_json(retry_content)
         
         if not data:
-            print(f"[PLANNER] JSON parse still failed, using fallback single task")
-            # Fallback: create a single task
-            return {
-                "plan": [ResearchTask(
-                    id=str(uuid.uuid4()),
-                    description=state['query'],
-                    status="pending"
-                )],
-                "messages": ["Planner used fallback (JSON parse failed)"]
-            }
+            print(f"[PLANNER] JSON still failed, trying list format...")
+            # Second fallback: ask for newline-separated list
+            list_response = await self.llm.ainvoke(
+                f"Break this research question into 4-6 specific search queries. "
+                f"Return ONLY a numbered list, one query per line. "
+                f"Question: {state['query']}"
+            )
+            list_content = list_response.content if hasattr(list_response, 'content') else str(list_response)
+            
+            # Parse list format
+            tasks = []
+            for line in list_content.split('\n'):
+                line = line.strip()
+                # Remove numbering (1., 2., -, *, etc.)
+                import re
+                cleaned = re.sub(r'^[\d\.\-\*\)]+\s*', '', line)
+                if cleaned and len(cleaned) > 10:  # Meaningful query
+                    tasks.append(ResearchTask(
+                        id=str(uuid.uuid4()),
+                        description=cleaned,
+                        status="pending"
+                    ))
+            
+            if tasks:
+                print(f"[PLANNER] Generated {len(tasks)} tasks from list format")
+                return {"plan": tasks, "messages": ["Planner used list format"]}
+            else:
+                print(f"[PLANNER] List parsing failed, using fallback single task")
+                return {
+                    "plan": [ResearchTask(
+                        id=str(uuid.uuid4()),
+                        description=state['query'],
+                        status="pending"
+                    )],
+                    "messages": ["Planner used fallback (all parsing failed)"]
+                }
         
-        # Convert to internal model
+        # Convert JSON to internal model
         try:
             tasks = []
             for t in data.get("tasks", []):

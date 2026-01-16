@@ -9,4 +9,4 @@ httpx
 streamlit
 ray
 trafilatura
-duckduckgo-search>=6.0.0
+ddgs

@@ -76,17 +76,18 @@ if st.button("Start Research"):
                                     if f.extracted_data:
                                         st.json(f.extracted_data)
                         
-                        # Update Browser Trace
-                        if all_findings and hasattr(all_findings[-1], 'extracted_data'):
-                            trace_data = all_findings[-1].extracted_data
-                            if trace_data and 'retrieval_methods' in trace_data:
-                                with trace_area.expander("🔍 Retrieval Details", expanded=True):
-                                    for i, (url, method) in enumerate(zip(
-                                        trace_data.get('urls', []),
-                                        trace_data.get('retrieval_methods', [])
-                                    )):
-                                        st.write(f"**{i+1}. {url}**")
-                                        st.caption(f"Method: `{method}`")
+                        # Update Browser Trace (with None guards)
+                        if all_findings:
+                            last_finding = all_findings[-1]
+                            if hasattr(last_finding, 'extracted_data') and last_finding.extracted_data:
+                                trace_data = last_finding.extracted_data
+                                if trace_data and 'retrieval_methods' in trace_data and 'urls' in trace_data:
+                                    with trace_area.expander("🔍 Retrieval Details", expanded=True):
+                                        urls = trace_data.get('urls', []) or []
+                                        methods = trace_data.get('retrieval_methods', []) or []
+                                        for i, (url, method) in enumerate(zip(urls, methods)):
+                                            st.write(f"**{i+1}. {url}**")
+                                            st.caption(f"Method: `{method}`")
 
                     # Update Report
                     if "final_report" in value and value["final_report"]:
