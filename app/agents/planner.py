@@ -1,13 +1,40 @@
-from langchain_ollama import ChatOllama
+from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from app.models import ResearchPlan, ResearchTask
 from app.state import AgentState
 import uuid
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class PlannerAgent:
-    def __init__(self, model_name="mistral"):
-        self.llm = ChatOllama(model=model_name, temperature=0, format="json")
+    def __init__(self, model_name=None):
+        if model_name is None:
+            model_name = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+        
+        self.model_name = model_name
+        self.fallback_model = "claude-haiku-4-5"
+        
+        try:
+            self.llm = ChatAnthropic(
+                model=model_name,
+                anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+                temperature=0.7,
+                max_tokens=4096
+            )
+            print(f"[PLANNER] Using model: {model_name}")
+        except Exception as e:
+            print(f"[PLANNER] Model {model_name} failed, falling back to {self.fallback_model}: {e}")
+            self.llm = ChatAnthropic(
+                model=self.fallback_model,
+                anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+                temperature=0.7,
+                max_tokens=4096
+            )
+            self.model_name = self.fallback_model
+        
         self.parser = PydanticOutputParser(pydantic_object=ResearchPlan)
         
         self.prompt = ChatPromptTemplate.from_messages([

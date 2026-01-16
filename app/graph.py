@@ -6,11 +6,11 @@ from app.agents.analyzer import AnalyzerAgent
 from app.agents.synthesizer import SynthesizerAgent
 from app.models import ResearchTask, ResearchFinding
 
-# Initialize Agents
-planner = PlannerAgent(model_name="mistral")
+# Initialize Agents (will use ANTHROPIC_MODEL from .env or default to claude-sonnet-4-5)
+planner = PlannerAgent()
 web_agent = WebAgent()
-analyzer = AnalyzerAgent(model_name="mistral")
-synthesizer = SynthesizerAgent(model_name="mistral")
+analyzer = AnalyzerAgent()
+synthesizer = SynthesizerAgent()
 
 async def plan_node(state: AgentState):
     result = await planner.plan(state)

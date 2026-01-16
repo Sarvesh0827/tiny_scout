@@ -82,4 +82,9 @@ if st.button("Start Research"):
     asyncio.run(run_research())
 
 st.sidebar.markdown("### Availability")
-st.sidebar.success("Local Mistral Agent Active")
+import os
+from dotenv import load_dotenv
+load_dotenv()
+active_model = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+st.sidebar.success(f"🟢 Claude Active")
+st.sidebar.caption(f"Model: {active_model}")

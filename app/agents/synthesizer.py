@@ -1,11 +1,37 @@
-from langchain_ollama import ChatOllama
+from langchain_anthropic import ChatAnthropic
 from langchain_core.prompts import ChatPromptTemplate
 from app.state import AgentState
 from app.models import FinalReport
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class SynthesizerAgent:
-    def __init__(self, model_name="mistral"):
-        self.llm = ChatOllama(model=model_name, temperature=0)
+    def __init__(self, model_name=None):
+        if model_name is None:
+            model_name = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-5")
+        
+        self.model_name = model_name
+        self.fallback_model = "claude-haiku-4-5"
+        
+        try:
+            self.llm = ChatAnthropic(
+                model=model_name,
+                anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+                temperature=0.5,
+                max_tokens=4096
+            )
+            print(f"[SYNTHESIZER] Using model: {model_name}")
+        except Exception as e:
+            print(f"[SYNTHESIZER] Model {model_name} failed, falling back to {self.fallback_model}: {e}")
+            self.llm = ChatAnthropic(
+                model=self.fallback_model,
+                anthropic_api_key=os.getenv("ANTHROPIC_API_KEY"),
+                temperature=0.5,
+                max_tokens=4096
+            )
+            self.model_name = self.fallback_model
         
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", "You are a professional research report writer. "
