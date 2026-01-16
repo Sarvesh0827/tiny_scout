@@ -40,7 +40,7 @@ class PlannerAgent:
         self.prompt = ChatPromptTemplate.from_messages([
             ("system", "You are an expert research planner. Break down the user's research question into 3-5 actionable web research tasks. "
                        "IMPORTANT: Return ONLY valid JSON with NO markdown formatting, NO code blocks, NO prose. "
-                       "Format: {\"main_goal\": \"...\", \"tasks\": [{\"description\": \"...\"}, ...]}"),
+                       "Format: {{\"main_goal\": \"...\", \"tasks\": [{{\"description\": \"...\"}}, ...]}}"),
             ("user", "{query}")
         ])
         
