@@ -21,6 +21,7 @@ async def web_execution_node(state: AgentState):
     tasks = state['plan']
     findings = []
     messages = []
+    logger = state.get('logger')
     
     # Simple sequential execution for simulation
     # In full version, we'd use 'map' parallel execution
@@ -30,7 +31,7 @@ async def web_execution_node(state: AgentState):
             messages.append(msg)
             print(msg)
             
-            finding = await web_agent.execute_task(task)
+            finding = await web_agent.execute_task(task, logger=logger)
             
             # 3. Analyze immediately
             analysis = await analyzer.analyze(finding.content, task.description)

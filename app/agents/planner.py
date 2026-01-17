@@ -37,133 +37,75 @@ class PlannerAgent:
         
         self.parser = PydanticOutputParser(pydantic_object=ResearchPlan)
         
+        # Priority 5: Robust List Format by default
         self.prompt = ChatPromptTemplate.from_messages([
-            ("system", "You are an expert research planner. Break down the user's research question into 3-5 actionable web research tasks. "
-                       "IMPORTANT: Return ONLY valid JSON with NO markdown formatting, NO code blocks, NO prose. "
-                       "Format: {{\"main_goal\": \"...\", \"tasks\": [{{\"description\": \"...\"}}, ...]}}"),
+            ("system", "You are an expert research planner. Break down the user's research question into 4-6 specific search queries.\n"
+                       "IMPORTANT: Return ONLY a numbered list of queries. One query per line.\n"
+                       "Do not use JSON. Do not include introductory text."),
             ("user", "{query}")
         ])
         
         self.chain = self.prompt | self.llm 
 
-    def _extract_json(self, text: str) -> dict:
-        """Extract JSON from response, handling markdown and prose."""
-        import re
-        
-        # Try to find JSON between first { and last }
-        first_brace = text.find('{')
-        last_brace = text.rfind('}')
-        
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            json_str = text[first_brace:last_brace+1]
-            try:
-                return json.loads(json_str)
-            except:
-                pass
-        
-        # If that fails, try the whole text
-        try:
-            return json.loads(text)
-        except:
-            pass
-        
-        # Last resort: look for JSON in code blocks
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except:
-                pass
-        
-        return None
-
     async def plan(self, state: AgentState) -> dict:
         """
-        Invokes the planner to generate a list of tasks.
+        Invokes the planner to generate a list of tasks using robust list parsing.
         """
+        logger = state.get('logger')
+        
+        if logger:
+            logger.log('planner', f"Planning started for query: {state['query']}", 
+                      payload={'query': state['query'], 'model': self.model_name})
+        
         print(f"--- PLANNER: Planning for query: {state['query']} ---")
         
-        # Invoke LLM
-        response = await self.chain.ainvoke({"query": state['query']})
-        
-        # Extract content
-        content_str = response.content if hasattr(response, 'content') else str(response)
-        
-        # Try to parse JSON with robust extraction
-        data = self._extract_json(content_str)
-        
-        if not data:
-            print(f"[PLANNER] JSON parse failed, retrying with explicit instruction...")
-            # Retry once with more explicit prompt
-            retry_response = await self.llm.ainvoke(
-                f"Convert this research question into JSON format with main_goal and tasks array. "
-                f"Return ONLY the JSON object, nothing else: {state['query']}"
-            )
-            retry_content = retry_response.content if hasattr(retry_response, 'content') else str(retry_response)
-            data = self._extract_json(retry_content)
-        
-        if not data:
-            print(f"[PLANNER] JSON still failed, trying list format...")
-            # Second fallback: ask for newline-separated list
-            list_response = await self.llm.ainvoke(
-                f"Break this research question into 4-6 specific search queries. "
-                f"Return ONLY a numbered list, one query per line. "
-                f"Question: {state['query']}"
-            )
-            list_content = list_response.content if hasattr(list_response, 'content') else str(list_response)
+        try:
+            # Invoke LLM
+            response = await self.chain.ainvoke({"query": state['query']})
+            content_str = response.content if hasattr(response, 'content') else str(response)
+            
+            if logger:
+                logger.log('planner', 'Raw LLM response received', level='debug',
+                          payload={'raw_response': content_str[:500], 'length': len(content_str)})
             
             # Parse list format
             tasks = []
-            for line in list_content.split('\n'):
+            for line in content_str.split('\n'):
                 line = line.strip()
-                # Remove numbering (1., 2., -, *, etc.)
                 import re
+                # Remove Markdown list bullets and numbers (1., -, *, etc.)
                 cleaned = re.sub(r'^[\d\.\-\*\)]+\s*', '', line)
                 if cleaned and len(cleaned) > 10:  # Meaningful query
-                    tasks.append(ResearchTask(
+                     tasks.append(ResearchTask(
                         id=str(uuid.uuid4()),
                         description=cleaned,
                         status="pending"
                     ))
             
-            if tasks:
-                print(f"[PLANNER] Generated {len(tasks)} tasks from list format")
-                return {"plan": tasks, "messages": ["Planner used list format"]}
-            else:
-                print(f"[PLANNER] List parsing failed, using fallback single task")
-                return {
-                    "plan": [ResearchTask(
-                        id=str(uuid.uuid4()),
-                        description=state['query'],
-                        status="pending"
-                    )],
-                    "messages": ["Planner used fallback (all parsing failed)"]
-                }
-        
-        # Convert JSON to internal model
-        try:
-            tasks = []
-            for t in data.get("tasks", []):
-                task_desc = t.get("description") if isinstance(t, dict) else str(t)
-                tasks.append(ResearchTask(
-                    id=str(uuid.uuid4()),
-                    description=task_desc,
-                    status="pending"
-                ))
-            
             if not tasks:
-                # If no tasks, use the query itself
+                if logger:
+                    logger.log('planner', 'List parsing yielded no tasks, using fallback', level='warn')
+                print(f"[PLANNER] List parsing yielded no tasks, using fallback.")
                 tasks = [ResearchTask(
                     id=str(uuid.uuid4()),
                     description=state['query'],
                     status="pending"
                 )]
             
+            if logger:
+                logger.log('planner', f'Generated {len(tasks)} tasks', 
+                          payload={'task_count': len(tasks), 
+                                  'tasks': [t.description for t in tasks]})
+            
             print(f"[PLANNER] Generated {len(tasks)} tasks")
-            return {"plan": tasks, "messages": ["Planner generated tasks."]}
+            return {"plan": tasks, "messages": ["Planner generated tasks (List Mode)."]}
             
         except Exception as e:
-            print(f"[PLANNER] Error processing tasks: {e}")
+            if logger:
+                logger.log('planner', f'Error generating plan: {str(e)}', level='error',
+                          payload={'error': str(e), 'error_type': type(e).__name__})
+            
+            print(f"[PLANNER] Error generating plan: {e}")
             return {
                 "plan": [ResearchTask(
                     id=str(uuid.uuid4()),
